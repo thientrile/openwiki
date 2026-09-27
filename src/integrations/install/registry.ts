@@ -8,6 +8,21 @@ import type {
  * Complete immutable registry of supported host installation targets.
  */
 export const HOST_TARGETS = {
+  bob: {
+    id: "bob",
+    displayName: "IBM Bob",
+    producerActor: "bob",
+    user: {
+      skillDirectory: ".agents/skills/openwiki",
+      mcpConfig: { kind: "json", relativePath: ".bob/mcp.json" },
+    },
+    project: {
+      skillDirectory: ".agents/skills/openwiki",
+      mcpConfig: { kind: "json", relativePath: ".bob/mcp.json" },
+    },
+    documentationUrl:
+      "https://bob.ibm.com/docs/ide/configuration/mcp/understanding-mcp",
+  },
   codex: {
     id: "codex",
     displayName: "Codex",
@@ -61,6 +76,68 @@ export const HOST_TARGETS = {
       },
     },
     documentationUrl: "https://opencode.ai/docs/mcp-servers/",
+  },
+  cursor: {
+    id: "cursor",
+    displayName: "Cursor",
+    producerActor: "cursor",
+    user: {
+      skillDirectory: ".cursor/skills/openwiki",
+      mcpConfig: { kind: "json", relativePath: ".cursor/mcp.json" },
+    },
+    project: {
+      skillDirectory: ".cursor/skills/openwiki",
+      mcpConfig: { kind: "json", relativePath: ".cursor/mcp.json" },
+    },
+    documentationUrl: "https://cursor.com/docs/mcp",
+  },
+  kiro: {
+    id: "kiro",
+    displayName: "Kiro",
+    producerActor: "kiro",
+    user: {
+      skillDirectory: ".kiro/skills/openwiki",
+      mcpConfig: { kind: "json", relativePath: ".kiro/settings/mcp.json" },
+    },
+    project: {
+      skillDirectory: ".kiro/skills/openwiki",
+      mcpConfig: { kind: "json", relativePath: ".kiro/settings/mcp.json" },
+    },
+    documentationUrl: "https://kiro.dev/docs/mcp/configuration/",
+  },
+  omp: {
+    id: "omp",
+    displayName: "Oh My Pi",
+    producerActor: "omp",
+    // User scope targets omp's default agent dir (~/.omp/agent). Named profiles
+    // and PI_CODING_AGENT_DIR overrides use another directory; use --project
+    // for those setups.
+    user: {
+      skillDirectory: ".omp/agent/skills/openwiki",
+      mcpConfig: { kind: "json", relativePath: ".omp/agent/mcp.json" },
+    },
+    project: {
+      skillDirectory: ".omp/skills/openwiki",
+      mcpConfig: { kind: "json", relativePath: ".omp/mcp.json" },
+    },
+    documentationUrl: "https://omp.sh",
+  },
+  antigravity: {
+    id: "antigravity",
+    displayName: "Antigravity CLI",
+    producerActor: "antigravity",
+    user: {
+      skillDirectory: ".gemini/antigravity-cli/skills/openwiki",
+      mcpConfig: {
+        kind: "json",
+        relativePath: ".gemini/config/mcp_config.json",
+      },
+    },
+    project: {
+      skillDirectory: ".agents/skills/openwiki",
+      mcpConfig: { kind: "json", relativePath: ".agents/mcp_config.json" },
+    },
+    documentationUrl: "https://antigravity.google/docs/mcp?tab=cli",
   },
 } as const satisfies Record<HostTargetId, HostTarget>;
 

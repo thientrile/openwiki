@@ -27,6 +27,7 @@ import {
   runVisualizeCommand,
 } from "./runners.js";
 import { runIntegrationsCommand, runMcpCommand } from "./integrations.js";
+import { runLinkCommand, runWorkspaceCommand } from "./link.js";
 
 /**
  * Commands handled by the native OpenWiki startup and rendering pipeline.
@@ -77,12 +78,11 @@ async function runStandardCommand(
     showFirstRunNotice = await firstRunNoticePending();
   }
 
-  if (command.kind === "run" && command.languageWarning) {
-    // stderr keeps piped stdout clean while still warning about an ignored locale.
-    process.stderr.write(`${command.languageWarning}\n`);
-  }
-
-  if (command.kind === "auth") {
+  if (command.kind === "link") {
+    await runLinkCommand(command);
+  } else if (command.kind === "workspace") {
+    await runWorkspaceCommand(command);
+  } else if (command.kind === "auth") {
     await runAuthCommand(command);
   } else if (command.kind === "ngrok") {
     await runNgrokCommand(command);

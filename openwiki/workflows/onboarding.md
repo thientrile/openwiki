@@ -3,9 +3,6 @@ type: workflow
 title: Onboarding and Setup
 description: How OpenWiki's first-run setup selects a provider and model, captures credentials, chooses a run mode, and bootstraps code-mode repositories, plus the layout and permissions of the ~/.openwiki state directory.
 tags: [onboarding, setup, credentials, code-mode, openwiki-home, configuration]
-verified:
-  - by: openwiki/0.3.3
-    at: 2026-08-25T02:14:25.283Z
 sources:
   - id: openwiki-source-a34c01da72fb3c9bee4f3cb9
     resource: repo://src/agent/openwiki-ignore.ts
@@ -13,6 +10,8 @@ sources:
     resource: repo://src/cli/runners.ts
   - id: openwiki-source-d80f123259efa4712b198b63
     resource: repo://src/cli/startup.ts
+  - id: openwiki-source-278e7e180eac811fc1a24f7a
+    resource: repo://src/config/constants.ts
   - id: openwiki-source-c2770ac037a7f4b0116a0dc5
     resource: repo://src/config/env.ts
   - id: openwiki-source-7d433875b0854d0b8b951be0
@@ -21,6 +20,8 @@ sources:
     resource: repo://src/generation/repository-run.ts
   - id: openwiki-source-85064d6a188fa56bcc282f11
     resource: repo://src/ingestion/code-mode.ts
+  - id: openwiki-source-349c953869b025f9d4935470
+    resource: repo://src/platform/language.ts
   - id: openwiki-source-28a5ae6f5a5bb7466bd04868
     resource: repo://src/setup/credentials/constants.ts
   - id: openwiki-source-c35800ddf00768a1fa848d13
@@ -31,7 +32,12 @@ sources:
     resource: repo://src/setup/credentials/use-init-setup.ts
   - id: openwiki-source-14d4f389b56575bb7afd1310
     resource: repo://src/setup/onboarding.ts
-generated: { by: "openwiki/0.3.3", at: "2026-08-25T02:14:25.283Z" }
+  - id: openwiki-source-224b03172757408e1b558fa7
+    resource: repo://test/ingestion/code-mode.test.ts
+generated: { by: "openwiki/0.5.2", at: "2026-09-23T08:09:37.122Z" }
+verified:
+  - by: openwiki/0.5.2
+    at: 2026-09-23T08:09:37.122Z
 ---
 
 # Onboarding and Setup
@@ -121,8 +127,8 @@ by a controller state machine. The steps that apply to a given provider and run
 mode, in walk order, are produced by `orderedSetupSteps`: an optional run-mode
 chooser, the provider selection, the provider's primary credential step, any
 provider-specific steps (secret key, GCP project/location, base URL, region),
-then the model step, the LangSmith step, and finally — only in code mode — a
-`code-repo-confirm` step.
+then the model step (skipped for providers that pin a single `fixedModel`), the
+LangSmith step, and finally — only in code mode — a `code-repo-confirm` step.
 
 The primary credential step is chosen per provider by `credentialStep`: OAuth
 providers use `oauth-login`, AWS-SDK providers have no in-wizard step (they are
@@ -130,13 +136,22 @@ handled via AWS credentials), external-CLI providers use `external-cli-auth`,
 API-key providers use `api-key`, and keyless providers that require a GCP project
 use `gcp-project`.
 
+A provider with a `fixedModel` (checked by `providerHasFixedModel`) always uses
+that single model ID and skips the model-selection step entirely — the value is
+used verbatim rather than normalized. The IBM Bob provider is the fixed-model
+case: it pins `fixedModel: "premium"`, authenticates with an API key
+(`BOB_API_KEY`, via the `api-key` credential step), and exposes an optional
+`BOB_BASE_URL`, so its spine runs provider → api-key → langsmith →
+(code-repo-confirm in code mode) with no model step.
+
 ```mermaid
 stateDiagram-v2
   [*] --> run_mode
   run_mode --> provider
   provider --> credential
   credential --> extra_provider_steps
-  extra_provider_steps --> model
+  extra_provider_steps --> model: non-fixedModel provider
+  extra_provider_steps --> langsmith: fixedModel provider
   model --> langsmith
   langsmith --> code_repo_confirm: code mode
   langsmith --> [*]: personal mode
@@ -144,6 +159,9 @@ stateDiagram-v2
 ```
 
 Ordered setup steps for code vs. personal mode as returned by orderedSetupSteps.
+The model step is emitted only when the provider does not pin a fixedModel
+(providerHasFixedModel), so a fixedModel provider such as IBM Bob goes straight
+from the provider-specific steps to the LangSmith step.
 
 Two functions distinguish "which step to jump to" from "which steps exist".
 `getInitialStep` is a skip-based waterfall that lands on the first unsatisfied
@@ -201,8 +219,61 @@ repository runs (`beginRepositoryRun`). It:
   region between the `<!-- OPENWIKI:START -->` / `<!-- OPENWIKI:END -->` markers
   is replaced, so operator content outside the markers survives. Both files are
   prepared and validated before either is written, and malformed or duplicated
-  markers abort the update with the file left unchanged. The `CLAUDE.md` snippet
-  is deliberately minimal and just points to `AGENTS.md`.
+  markers abort the update with the file left unchanged. By default the
+  `CLAUDE.md` managed block is deliberately minimal and just points to
+  `AGENTS.md` via the `@AGENTS.md` import, so `AGENTS.md` stays the single
+  canonical source of agent instructions.
+- **Retrieval-first AGENTS.md block.** The `AGENTS.md` managed block
+  (`createCodeModeAgentsSnippet`) is retrieval-first rather than eager-load: it
+  tells the agent **not** to enumerate, preload, or search wikis at task start,
+  but to reach for `openwiki_search` (just-in-time context) and `openwiki_read`
+  (the relevant complete sections) when unfamiliar architecture or dependency
+  behavior materially affects the task, or when source inspection leaves an
+  important uncertainty — stopping once the question is grounded. If a search
+  returns `workspace_required`, the agent asks which listed workspace to use and
+  retries with its ID; `openwiki_list_workspaces`/`openwiki_list_wikis` are for
+  discovering workspace membership itself. `openwiki/quickstart.md` and its
+  links are the fallback only when the retrieval tools are unavailable. Source
+  code and tests are treated as authoritative, and the brief's unknowns/review
+  items are verification gaps, not automatic requirements.
+- **Import-only CLAUDE.md preservation.** Two branches keep a forwarding
+  `CLAUDE.md` intact. First, a `CLAUDE.md` whose trimmed content is exactly
+  `@AGENTS.md` (the `CLAUDE_AGENTS_IMPORT` sentinel) is left entirely unchanged —
+  `prepareCodeModeAgentSnippet` returns `nextContent: undefined`, so the file is
+  neither created nor rewritten. This recognizes the common pattern of a
+  `CLAUDE.md` that only forwards to `AGENTS.md` and keeps it as the operator
+  wrote it. Second, `writeCodeModeAgentSnippets` calls `resolvesToSameFile` to
+  detect when `CLAUDE.md` and `AGENTS.md` resolve to the same file on disk
+  (e.g. `CLAUDE.md` is a symlink to `AGENTS.md`, sharing inode and device). In
+  that case the `@AGENTS.md` import would point the file at itself, so the
+  `CLAUDE.md` snippet instead carries the full instructions inline — the same
+  snippet written into `AGENTS.md` — rather than the minimal pointer. A
+  `CLAUDE.md` that is neither the bare import nor the same file as `AGENTS.md`,
+  but contains marker regions or any other content, is refreshed in place like
+  `AGENTS.md`.
+- **Legacy pre-marker section removal.** Pre-marker (0.0.x) releases wrote an
+  unmarked `## OpenWiki` section straight into `AGENTS.md`/`CLAUDE.md`. Before
+  deciding where the managed block goes, `prepareCodeModeAgentSnippet` strips
+  those legacy sections via `findLegacyOpenWikiSections` so a file that was
+  first touched by an old release is not left with a stale section sitting
+  beside the new managed block (two `## OpenWiki` headings). A heading only
+  qualifies as legacy when its next non-blank line is exactly the released
+  template sentence ("This repository has documentation located in the
+  /openwiki directory."), so a hand-written `## OpenWiki` section that merely
+  shares the heading is never touched, and a heading quoted inside a fenced
+  code block is skipped (the parser tracks CommonMark fence state, so a `~~~`
+  line inside a ` ``` ` block does not close the outer fence). The removal
+  consumes only the known template lines beneath the heading and stops at the
+  first line that is not one of them, so hand-edited content below the section
+  — a customized quickstart link, an appended sentence, a trailing paragraph —
+  survives intact. With markers absent and a legacy section present, the
+  managed block is placed where the section was (preserving the file's shape)
+  rather than appended to the end; with no markers and no legacy section it is
+  appended after existing content. When stripping a legacy section from an
+  import-only `CLAUDE.md` leaves nothing but `@AGENTS.md`, that import is kept
+  verbatim (no managed block is added, since `AGENTS.md` already carries the
+  instructions). Marker validation runs on the post-legacy-removal content, so
+  a malformed/duplicated marker set still aborts with the file unchanged.
 - Creates the scheduled-update GitHub Actions workflow
   (`.github/workflows/openwiki-update.yml`) **only** when `createWorkflow` is set,
   which is the case only for the `init` command. `--update` and chat runs leave
@@ -210,15 +281,60 @@ repository runs (`beginRepositoryRun`). It:
   when it does not already exist, so operator customizations (fork guards, pinned
   actions, custom steps) are never silently overwritten.
 
-The generated workflow runs `openwiki code --update --print` on a cron schedule
-(default `0 8 * * *`), checks out full history so the update can diff against the
-last documented commit, installs the pinned OpenWiki version, and opens a pull
-request scoped to `openwiki`, `AGENTS.md`, `CLAUDE.md`, and the workflow file.
-Its provider `env:` block is derived from the provider the operator configured
-during setup (`createWorkflowProviderEnv`): secrets are wired through
-`secrets.`, non-sensitive settings (base URL, project, region) through `vars.`,
-and OAuth providers emit a comment noting that browser login has no unattended
-equivalent instead of pinning a short-lived, rotated token.
+Before `beginRepositoryRun` touches the repository it also validates the
+requested `--language` value: an unrecognized tag is rejected up front (via
+`resolveLanguage`) rather than silently defaulted to English. This matters for
+setup because a wrong language would be persisted in durable run state, and a
+later resume refuses to change a started run's language — so the typo could not
+be corrected without deleting OpenWiki's own state files.
+
+The generated workflow (`createCodeModeWorkflow`) emits a `workflow_dispatch`-
+plus-scheduled GitHub Actions job whose `name:` is `OpenWiki Update`, gated by
+`permissions: contents: write` and `pull-requests: write`. It runs `openwiki code
+--update --print` on a cron schedule (default `0 8 * * *`), then opens a pull
+request scoped to `openwiki`, `AGENTS.md`, `CLAUDE.md`, and the workflow file
+itself. Key invariants of the emitted template:
+
+- **Pinned actions.** All third-party actions are pinned to commit SHAs (with a
+  `# vN` version comment): `actions/checkout@34e1148…` (v4),
+  `actions/setup-node@49933ea…` (v4, Node 22), and
+  `peter-evans/create-pull-request@22a90890…` (v7), so a re-run is reproducible
+  even if a tag is moved. The OpenWiki binary itself is installed as
+  `openwiki@${OPENWIKI_VERSION}`, the version baked in at build time.
+- **Full-history checkout.** `actions/checkout` is called with `fetch-depth: 0`
+  so the update can diff `HEAD` against the commit it last documented; a shallow
+  clone would hide that commit and run against an empty change summary.
+- **Mermaid/jsdom install note.** The install step runs
+  `npm install --global openwiki@${OPENWIKI_VERSION} mermaid@11.16.0 jsdom@29.1.1`
+  and carries an inline comment noting that `mermaid` + `jsdom` are optional and
+  add high-fidelity Mermaid diagram validation, and may be removed for repos with
+  no diagrams.
+- **Provider env injection.** The `Run OpenWiki` step's `env:` block is the
+  derived provider block from `createWorkflowProviderEnv` (below) plus the
+  `OPENWIKI_LANGSMITH_API_KEY` (for the LangSmith code-mode pull, with a comment
+  pointing to `OPENWIKI_LANGSMITH_API_KEY_2/_3` for extra workspaces) and the
+  optional `LANGSMITH_API_KEY`/`LANGCHAIN_PROJECT`/`LANGCHAIN_TRACING_V2`
+  tracing triple.
+- **Transient-state cleanup and PR-before-failure.** The OpenWiki step sets
+  `continue-on-error: true` so a page-level failure does not abort the job. A
+  `Remove transient OpenWiki run state` step (`if: !cancelled()`) deletes
+  `openwiki/.run.json`, and the `Create OpenWiki update pull request` step (also
+  `if: !cancelled()`) always opens the PR, preserving the pages completed before
+  a failure as the baseline for the next run. A final `Propagate OpenWiki
+  failure` step (`if: steps.openwiki.outcome == 'failure'`, `run: exit 1`) then
+  turns the job red so the failed run is visible, while the PR with partial
+  progress still goes through.
+
+The provider `env:` block is derived from the provider the operator configured
+during setup (`createWorkflowProviderEnv`): the `OPENWIKI_PROVIDER` line names
+it, secrets are wired through `${{ secrets.* }}`, non-sensitive settings (base
+URL, GCP project, region) through `${{ vars.* }}`, and OAuth providers emit a
+comment noting that browser login has no unattended equivalent instead of
+pinning a short-lived, rotated token. The model id is quoted (some IDs, e.g.
+Cloudflare Workers AI's leading `@`, are not plain YAML scalars), defaulting to
+the operator's choice or the provider's first suggested model; an opted-in
+`OPENAI_COMPATIBLE_STREAMING` transport override is propagated so a SSE-only
+gateway does not commit a blank wiki unattended.
 
 Repository content the doc agent must not read or edit is governed by a
 gitignore-style `.openwikiignore` file loaded via `OpenWikiIgnore.load`. Rules

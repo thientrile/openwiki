@@ -3,7 +3,10 @@ import {
   CLAIMS_RECONCILIATION_GUIDANCE,
   CLAIMS_SUBSTANCE_GUIDANCE,
 } from "../claims/guidance.js";
-import type { ActiveBeginView } from "../generation/repository-run.js";
+import type {
+  ActiveBeginView,
+  RepositoryPageUpdateWindow,
+} from "../generation/repository-run.js";
 import type { PageJob } from "../generation/run-state.js";
 
 /**
@@ -19,7 +22,18 @@ export function createRepositoryPlannerPrompt(
 ): string {
   const updateContext =
     view.mode === "update"
-      ? `\nChanged repository paths:\n${formatList(view.changedPaths)}\n\nClaims requiring attention:\n${formatIssues(view.claimIssues)}`
+      ? `
+For update, evaluate each existing page inside its own committed update window.
+A page already advanced by a merged partial update must not be regenerated for
+changes at or before its baseline. Schedule it only when changes after that
+baseline, current Claims issues, language rewriting, navigation changes, or
+cross-page consistency require work.
+
+Committed per-page update windows:
+${formatPageUpdateWindows(view.pageUpdateWindows)}
+
+Claims requiring attention:
+${formatIssues(view.claimIssues)}`
       : "";
 
   const semanticContext = planningContext
@@ -28,8 +42,9 @@ export function createRepositoryPlannerPrompt(
 
   return `You are planning an OpenWiki code wiki for this repository.
 
-Your only output action is submit_plan. Do not write documentation and do not
-delegate work.
+Your only output action is submit_plan. Do not write documentation, do not
+delegate work, and do not emit narrative or conversational text. Invoke
+submit_plan directly.
 
 Design the smallest complete repository-specific information architecture that
 helps a coding agent understand and safely change the system. Organize around
@@ -82,16 +97,17 @@ export type RepositoryPageWorkerJob = PageJob & {
    */
   existing: boolean;
 
-  /**
-   * Complete persisted Claim set currently owned by the assigned page.
-   */
-  existingClaims: InspectedClaim[];
+  /** Number of persisted Claims currently owned by the assigned page. */
+  existingClaimCount: number;
+
+  /** Stale or unresolved Claims that require an explicit worker decision. */
+  claimsRequiringAttention: InspectedClaim[];
 };
 
 /**
  * Builds the prompt for one fresh worker owning exactly one page job.
  *
- * @param job - Assigned page and its complete existing Claim context.
+ * @param job - Assigned page and its compact required Claim context.
  * @param allPages - Complete ordered page queue for quickstart navigation.
  * @param language - Resolved output language for generated prose.
  * @returns Complete page-worker system prompt.
@@ -132,10 +148,13 @@ callees, state owners, integration boundaries, and representative tests when
 required. Do not turn the page into a source-file inventory.
 
 Write only ${job.path}. Do not create, edit, or delete another wiki page. After
-writing it, call submit_page with the COMPLETE intended material Claim set for
-this page. Reuse an existing Claim id when retaining or revising a known
-proposition. Omit the id for a genuinely new Claim. Omitting an old Claim
-retracts it. Every evidence resource MUST be a canonical repository URI such as
+writing it, call submit_page with only the sparse Claim decisions required by
+your edits: confirmedClaimIds for rechecked issue Claims that remain unchanged,
+claims for revised or new propositions, and retractedClaimIds for removed
+propositions. OpenWiki automatically retains the other current Claims. Call
+inspect_claims before intentionally revising or removing otherwise-current page
+content when you need its Claim ids; ordinary focused updates should not call it.
+Every evidence resource MUST be a canonical repository URI such as
 repo://src/agent/index.ts or repo://src/agent/index.ts#L40-L82; a bare path such
 as src/agent/index.ts is invalid. If submission validation fails, read the tool
 error, correct the page or Claim payload, and retry; the worker completes after
@@ -145,7 +164,8 @@ ${CLAIMS_SUBSTANCE_GUIDANCE}
 
 ${CLAIMS_RECONCILIATION_GUIDANCE}
 
-Existing Claims:\n${JSON.stringify(job.existingClaims, null, 2)}
+This page currently owns ${job.existingClaimCount} Claim(s). Claims requiring an
+explicit decision in this job:\n${JSON.stringify(job.claimsRequiringAttention, null, 2)}
 
 ${
   job.path === "/openwiki/quickstart.md"
@@ -185,4 +205,28 @@ function formatIssues(issues: ActiveBeginView["claimIssues"]): string {
         )
         .join("\n")
     : "- (none)";
+}
+
+/**
+ * Renders committed page baselines for repository update planning.
+ *
+ * @param windows - Stable page cohorts returned by the lifecycle.
+ * @returns Compact planner context with explicit unknown baselines.
+ */
+function formatPageUpdateWindows(
+  windows: readonly RepositoryPageUpdateWindow[],
+): string {
+  if (windows.length === 0) return "- (none)";
+  return windows
+    .map((window) => {
+      const baseline = window.fullReview
+        ? "unknown (full review required)"
+        : window.baseGitHead;
+      return [
+        `- Baseline ${baseline}:`,
+        `  - Pages: ${window.pages.join(", ") || "(none)"}`,
+        `  - Changed paths: ${window.changedPaths.join(", ") || "(none)"}`,
+      ].join("\n");
+    })
+    .join("\n");
 }

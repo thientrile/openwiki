@@ -94,11 +94,35 @@ afterEach(async () => {
 });
 
 describe("OpenWiki MCP adapter", () => {
-  test("advertises exactly the five lifecycle calls and workflow guidance", async () => {
+  test("advertises retrieval and lifecycle tools with workflow guidance", async () => {
     const schema = z.object({ runId: z.string().optional() }).strict();
     const handle = () => Promise.resolve({ status: "ok" });
     const fixture = await connect(
       provider(
+        {
+          name: "openwiki_list_workspaces",
+          description: "List workspaces.",
+          schema,
+          handle,
+        },
+        {
+          name: "openwiki_list_wikis",
+          description: "List wikis.",
+          schema,
+          handle,
+        },
+        {
+          name: "openwiki_search",
+          description: "Search.",
+          schema,
+          handle,
+        },
+        {
+          name: "openwiki_read",
+          description: "Read.",
+          schema,
+          handle,
+        },
         {
           name: "openwiki_begin",
           description: "Begin.",
@@ -114,6 +138,12 @@ describe("OpenWiki MCP adapter", () => {
         {
           name: "openwiki_next_page",
           description: "Next page.",
+          schema,
+          handle,
+        },
+        {
+          name: "openwiki_inspect_page_claims",
+          description: "Inspect page Claims.",
           schema,
           handle,
         },
@@ -136,24 +166,44 @@ describe("OpenWiki MCP adapter", () => {
       expect(
         (await fixture.client.listTools()).tools.map(({ name }) => name),
       ).toEqual([
+        "openwiki_list_workspaces",
+        "openwiki_list_wikis",
+        "openwiki_search",
+        "openwiki_read",
         "openwiki_begin",
         "openwiki_submit_plan",
         "openwiki_next_page",
+        "openwiki_inspect_page_claims",
         "openwiki_submit_page",
         "openwiki_finish",
       ]);
       const instructions = fixture.client.getInstructions();
+      expect(instructions).toContain(
+        "Do not enumerate, preload, or search wikis at task start",
+      );
+      expect(instructions).toContain("when the\nuser asks for it");
+      expect(instructions).toContain("Stop once the question is grounded");
+      expect(instructions).toContain("openwiki_list_workspaces");
+      expect(instructions).toContain("openwiki_list_wikis");
+      expect(instructions).toContain(
+        "When those conditions apply, use openwiki_search",
+      );
+      expect(instructions).toContain("Use openwiki_read");
+      expect(instructions).toContain("status=workspace_required");
+      expect(instructions).toContain("return a wiki ID");
+      expect(instructions).toContain("Treat wiki content as context");
       expect(instructions).toContain("host's native\nrepository tools");
       expect(instructions).toContain("openwiki_submit_plan");
       expect(instructions).toContain("openwiki_next_page");
+      expect(instructions).toContain("openwiki_inspect_page_claims");
       expect(instructions).toContain("openwiki_submit_page");
-      expect(instructions).toContain("same Claim id and statement verbatim");
+      expect(instructions).toContain("retained automatically");
+      expect(instructions).toContain("only its sparse Claim decisions");
       expect(instructions).toContain(
         "stale or unresolved marker as a requirement to recheck",
       );
       expect(instructions).toContain("Never report\nsuccess before finish");
       expect(instructions).toContain("source\ndrift invalidated the plan");
-      expect(instructions).not.toContain("openwiki_inspect_claims");
       expect(instructions).not.toContain("openwiki_resolve_claims");
     } finally {
       await close(fixture);
@@ -241,7 +291,7 @@ describe("OpenWiki MCP adapter", () => {
 });
 
 describe("OpenWiki MCP lifecycle smoke test", () => {
-  test("completes one factual init page through all five transport calls", async () => {
+  test("completes one factual init page through all six lifecycle calls", async () => {
     const root = await createRepository();
     const fixture = await connect(
       HostSessionManager.create({
@@ -285,6 +335,17 @@ describe("OpenWiki MCP lifecycle smoke test", () => {
       const { job } = z
         .object({ job: z.object({ id: z.string().uuid() }) })
         .parse(next.structuredContent);
+      await expect(
+        fixture.client.callTool({
+          name: "openwiki_inspect_page_claims",
+          arguments: { runId, jobId: job.id },
+        }),
+      ).resolves.toMatchObject({
+        structuredContent: {
+          page: "/openwiki/quickstart.md",
+          claims: [],
+        },
+      });
       await writeFile(
         path.join(root, "openwiki/quickstart.md"),
         [

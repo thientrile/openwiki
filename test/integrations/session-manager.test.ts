@@ -41,11 +41,12 @@ async function createRepository(): Promise<string> {
 /**
  * Creates a host manager with a deterministic lifecycle clock.
  *
+ * @param host - Stable host identity for the manager.
  * @returns Validated empty host manager.
  */
-function createManager(): HostSessionManager {
+function createManager(host = "codex"): HostSessionManager {
   return HostSessionManager.create({
-    host: "codex",
+    host,
     now: () => new Date(RUN_TIMESTAMP),
   });
 }
@@ -148,18 +149,150 @@ afterEach(async () => {
 });
 
 describe("HostSessionManager", () => {
-  test("exposes exactly the ordered five-call lifecycle", () => {
+  test("resumes one durable queue across different hosts", async () => {
+    const root = await createRepository();
+    const codex = createManager("codex");
+    const started = (await codex.begin({
+      root,
+      mode: "init",
+    })) as ActiveBeginView;
+    await codex.submitPlan({
+      runId: started.runId,
+      pages: [
+        {
+          path: "/openwiki/architecture.md",
+          title: "Architecture",
+          purpose: "Document the repository architecture.",
+          seedPaths: ["README.md"],
+        },
+        {
+          path: "/openwiki/quickstart.md",
+          title: "Quickstart",
+          purpose: "Orient repository readers.",
+          seedPaths: ["README.md"],
+        },
+      ],
+    });
+    const first = (await codex.nextPage({
+      runId: started.runId,
+    })) as NextRepositoryPageResult;
+    if (first.status !== "pending") throw new Error("Expected first page.");
+    await writeFile(
+      path.join(root, "openwiki/architecture.md"),
+      quickstartPage().replaceAll("Quickstart", "Architecture"),
+      "utf8",
+    );
+    await codex.submitPage({
+      runId: started.runId,
+      jobId: first.job.id,
+      claims: [
+        {
+          statement: "The repository is introduced by its README.",
+          evidence: [{ resource: "repo://README.md" }],
+        },
+      ],
+    });
+
+    const claude = createManager("claude-code");
+    const resumed = (await claude.begin({
+      root,
+      mode: "init",
+    })) as ActiveBeginView;
+    expect(resumed).toMatchObject({
+      runId: started.runId,
+      resumed: true,
+      completedPages: 1,
+      totalPages: 2,
+    });
+    await expect(
+      claude.nextPage({ runId: resumed.runId }),
+    ).resolves.toMatchObject({
+      status: "pending",
+      job: { path: "/openwiki/quickstart.md" },
+    });
+  });
+
+  test("exposes retrieval before the ordered lifecycle tools", () => {
     expect(
       createManager()
         .tools()
         .map(({ name }) => name),
     ).toEqual([
+      "openwiki_list_workspaces",
+      "openwiki_list_wikis",
+      "openwiki_search",
+      "openwiki_read",
       "openwiki_begin",
       "openwiki_submit_plan",
       "openwiki_next_page",
+      "openwiki_inspect_page_claims",
       "openwiki_submit_page",
       "openwiki_finish",
     ]);
+  });
+
+  test("searches and reads wiki sections without an active generation run", async () => {
+    const root = await createRepository();
+    await mkdir(path.join(root, "openwiki"), { recursive: true });
+    await writeFile(
+      path.join(root, "openwiki/runtime.md"),
+      [
+        "---",
+        "type: guide",
+        "title: Runtime",
+        "description: Runtime startup and validation.",
+        "---",
+        "",
+        "# Runtime",
+        "",
+        "## Startup validation",
+        "",
+        "Configuration is validated before the worker starts.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const tools = new Map(
+      createManager()
+        .tools()
+        .map((tool) => [tool.name, tool]),
+    );
+
+    await expect(
+      tools.get("openwiki_search")?.handle({
+        root,
+        query: "worker startup validation",
+      }),
+    ).resolves.toMatchObject({
+      results: [{ ref: ["openwiki/runtime.md#startup-validation"] }],
+    });
+    await expect(
+      tools.get("openwiki_read")?.handle({
+        root,
+        page: "openwiki/runtime.md",
+        sections: ["startup-validation"],
+      }),
+    ).resolves.toEqual({
+      page: "openwiki/runtime.md",
+      sections: [
+        {
+          section: "startup-validation",
+          content:
+            "## Startup validation\n\nConfiguration is validated before the worker starts.",
+        },
+      ],
+    });
+    await expect(
+      tools.get("openwiki_read")?.handle({
+        root,
+        page: "openwiki/missing.md",
+        sections: ["missing"],
+      }),
+    ).rejects.toMatchObject({
+      name: "HostIntegrationError",
+      code: "invalid_input",
+      message: "The requested OpenWiki page does not exist.",
+    });
   });
 
   test("validates host and producer identities", () => {

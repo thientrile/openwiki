@@ -1,12 +1,11 @@
 ---
 type: concept
 title: Grounded Claims
-description: How OpenWiki grounds generated wiki pages in versioned repository evidence through the Claims model, including the store, session, and runtime split, evidence resolution and staleness detection, and the durability boundary reached at page completion.
+description: How OpenWiki grounds generated wiki pages in versioned repository evidence through the Claims model, including the store, session, and runtime split, evidence resolution and staleness detection, sparse page-completion reconciliation, on-demand full-Claim inspection, and the durability boundary reached at page completion.
 tags: [claims, evidence, grounding, provenance, verification, repository, okf]
-verified:
-  - by: openwiki/0.3.3
-    at: 2026-08-25T02:14:25.283Z
 sources:
+  - id: openwiki-source-8b316b2a9d744597bffd9c56
+    resource: repo://src/agent/repository-prompts.ts
   - id: openwiki-source-4abcc99d4dad36b191736bb7
     resource: repo://src/claims/brains/code/paths.ts
   - id: openwiki-source-3a2496f3cddf91f93a83147d
@@ -29,11 +28,24 @@ sources:
     resource: repo://src/claims/evidence/repository/resolver.ts
   - id: openwiki-source-cd8d06edadee75de8637208c
     resource: repo://src/claims/evidence/repository/resource.ts
+  - id: openwiki-source-638173446de4138fa3a622a8
+    resource: repo://src/claims/guidance.ts
+  - id: openwiki-source-1197594de038075f3570340c
+    resource: repo://src/generation/page-jobs.ts
+  - id: openwiki-source-7c5ecb56558cc061dab24f9d
+    resource: repo://src/generation/repository-run.ts
+  - id: openwiki-source-58835b77ce38a0dd1fed8d09
+    resource: repo://src/integrations/core/session-manager.ts
+  - id: openwiki-source-eab9328975981f427c4218d0
+    resource: repo://src/integrations/mcp/server.ts
   - id: openwiki-source-9bac7069736f3ea19ed36748
     resource: repo://src/okf/claim-sources.ts
   - id: openwiki-source-95484b6dcd037757691dcbb2
     resource: repo://src/okf/claims-verification.ts
-generated: { by: "openwiki/0.3.3", at: "2026-08-25T02:14:25.283Z" }
+generated: { by: "openwiki/0.5.2", at: "2026-09-23T08:09:37.122Z" }
+verified:
+  - by: openwiki/0.5.2
+    at: 2026-09-23T08:09:37.122Z
 ---
 
 # Grounded Claims
@@ -43,6 +55,13 @@ system, backed by one or more pieces of versioned repository evidence. Claims ar
 the factual backbone of a generated wiki page: each page owns a complete set of
 Claims, and OpenWiki tracks whether the source those Claims cite still matches
 what was observed when the page was written.
+
+The Claims model currently applies **only to repository code wikis and repository
+evidence**. The evidence resolver is `RepositoryEvidenceResolver`, rooted at a
+Git top-level and addressing files with `repo://` URIs; there is no
+connector-derived evidence path. Facts sourced from host integrations or
+connectors are not represented as Claims — only propositions grounded in
+versioned repository source are tracked, staleness-checked, and reconciled.
 
 The data model is deliberately small. A `Claim` has a stable OpenWiki-generated
 `id`, an atomic `statement`, and one or more `Evidence` records; each `Evidence`
@@ -69,6 +88,7 @@ working state, and lifecycle orchestration into three cooperating layers.
 stateDiagram-v2
     [*] --> Persisted
     Persisted --> Loaded: preflight loadPages
+    Persisted --> Excluded: finalize skipped page
     Loaded --> Stale: evidence version changed
     Loaded --> Unresolved: evidence missing
     Loaded --> Clean: evidence current
@@ -79,13 +99,15 @@ stateDiagram-v2
     Loaded --> Dirty: add mutation
     Dirty --> Verified: finalize recheck and write
     Dirty --> Retained: not dirty or blocked by debt
+    Excluded --> [*]
     Verified --> [*]
     Reconciled --> Retracted: retract or page deleted
     Retracted --> [*]
 ```
 
 Claim lifecycle and state transitions from persisted sidecar through preflight
-classification, reconciliation, and durable finalization.
+classification, reconciliation, and durable finalization. An `Excluded` page is
+one passed in `finalize`'s `excludedPages` set and is left untouched.
 
 ## Where Claim state persists
 
@@ -110,20 +132,23 @@ failure so a partial write can never corrupt a sidecar.
 Evidence is addressed by a canonical `repo://` URI. The resource is a normalized
 repository-relative path, optionally followed by a GitHub-style line-range
 fragment such as `repo://src/agent/index.ts#L40-L82`. A single-line fragment like
-`#L8` is accepted and canonicalized to `#L8-L8`. Parsing rejects paths that
+`#L8` is accepted and canonicalized to `#L8-L8`. Every evidence resource MUST use
+this `repo://<repository-relative-path>` form (optionally with `#Lx-Ly`); a bare
+path such as `src/agent/index.ts` is invalid. Parsing rejects paths that
 escape the repository, absolute or drive-letter paths, control characters, and
 references to `.git` or `openwiki/`.
 
 Resolution is fully deterministic and never involves the model. The
 `RepositoryEvidenceResolver` reads the file through a containment gate that
-refuses symbolic links and filesystem aliases, then produces an opaque
-`version` token. Whole-file evidence is versioned by a SHA-256 hash of the entire
-file (`repo-file-v1:sha256:...`). Line-range evidence is versioned by a hash of
-the selected content plus resolver-owned relocation anchors
-(`repo-lines-v1:sha256:...`), so that when edits move or resize a range the
-resolver can relocate the same selected text using its first and last selected
-lines and surrounding context, keeping the version stable when the content did
-not actually change.
+refuses symbolic links and filesystem aliases — raising an
+`EvidenceSecurityError` when the resolved path escapes the physical repository
+root — then produces an opaque `version` token. Whole-file evidence is versioned
+by a SHA-256 hash of the entire file (`repo-file-v1:sha256:...`). Line-range
+evidence is versioned by a hash of the selected content plus resolver-owned
+relocation anchors (`repo-lines-v1:sha256:...`), so that when edits move or
+resize a range the resolver can relocate the same selected text using its first
+and last selected lines and surrounding context, keeping the version stable when
+the content did not actually change.
 
 Because versions are content-derived, a version mismatch is exactly a content
 change. Resolution returns `null` when a file or range no longer exists, which is
@@ -142,7 +167,11 @@ resource against its recorded prior version and classifies the Claim:
 Unresolved takes precedence over stale for a given Claim. Issues are produced in
 a deterministic sorted order and carried into the session as `GroundingIssue`
 records attached to the owning page. Resolution errors (as opposed to a missing
-file) propagate rather than being mistaken for deleted evidence.
+file) propagate so they cannot be mistaken for deleted evidence, with one
+exception: an `EvidenceSecurityError` — a permanent containment refusal raised
+when evidence traverses a symbolic link or filesystem alias — is caught and
+treated as `null` (unresolved) for that resource, so the owning Claim is reported
+for reconciliation rather than aborting the run.
 
 A stale or unresolved marker is a **requirement to recheck current source**, not
 an instruction to retract. When a Claim is inspected, its issue is surfaced to
@@ -170,11 +199,63 @@ Inspection is side-effect-free: it returns cloned, model-facing Claims with the
 opaque evidence versions stripped and any preflight issue attached, without
 creating a write obligation.
 
+## Sparse page-completion submission
+
+A page job never resubmits its whole Claim set. The worker hands
+`submit_page` a **sparse** `ProposedPageClaimReconciliation` with three optional
+fields:
+
+- `confirmedClaimIds` — existing Claims explicitly rechecked and retained
+  unchanged (used for issue-bearing Claims the worker verified are still
+  accurate);
+- `claims` — revised existing Claims (carrying their existing id) and genuinely
+  new propositions (without an id);
+- `retractedClaimIds` — existing Claims removed from the completed page.
+
+`reconcilePageClaims` translates these sparse decisions into the complete
+`confirm` / `update` / `add` / `retract` operation batch the session expects.
+Existing issue-free Claims omitted from every field are **confirmed
+deterministically** — the model need not repeat their statements or evidence,
+and they are retained automatically. A Claim carrying a stale or unresolved
+grounding issue is the exception: it must appear in one of the three explicit
+fields, or reconciliation rejects the submission, so required grounding work
+cannot be skipped. Retraction is delete-like and stays safe across retries: an
+unknown id in `retractedClaimIds` is tolerated when it is no longer owned by the
+session, while unknown `update` / `confirm` ids remain strict.
+
+A proposed Claim with an existing id that is unchanged is folded into a
+`confirm`; a changed one becomes a partial `update` carrying only the fields that
+differ. A proposed Claim without an id is matched against an existing Claim with
+identical statement and evidence before falling back to an `add`, which the
+session allocates a globally unique id for. Reconciliation also refuses a result
+that would leave a completed factual page with zero Claims, so a grounded page
+always retains or establishes at least one material proposition.
+
+## On-demand full-Claim inspection
+
+`nextRepositoryPage` returns the first pending page job not excluded by the
+caller's in-flight worker set, without reserving or mutating it, along with
+only what a focused update needs: the job's `existingClaimCount` and
+`claimsRequiringAttention` — the subset of Claims carrying a stale or
+unresolved issue. Issue-free Claims are summarized as a count, not
+enumerated, so ordinary updates do not have to carry them.
+
+When a worker must intentionally revise or remove otherwise-current content —
+for example rewriting a section whose Claims are not in `claimsRequiringAttention`
+— it needs the actual Claim ids. `inspectRepositoryPageClaims` (the
+`openwiki_inspect_page_claims` tool) returns the pending page's complete compact
+Claim set without opaque evidence versions, and only for the current pending job.
+It is the on-demand way to obtain complete ids before a revision or removal;
+focused updates that touch only issue-bearing Claims need not call it.
+
 ## The durability boundary at page completion
 
 `ClaimSession.finalize` is the boundary where run-scoped Claim state becomes
-durable. It only touches pages that actually changed, and each such page must
-pass two gates before its sidecar is written:
+durable. It accepts an `excludedPages` set — pages whose generation jobs were
+skipped during an interrupted run — and leaves those pages untouched: it neither
+persists, rechecks, nor deletes their sidecars. For every other page, finalization
+only touches pages that actually changed, and each such page must pass two gates
+before its sidecar is written:
 
 1. **No evidence debt** — a page with unresolved grounding issues is refused, so
    stale or unresolved Claims cannot be silently persisted as verified.
@@ -182,12 +263,61 @@ pass two gates before its sidecar is written:
    time; if any resource disappeared or changed version since the mutation was
    accepted, the page is not persisted.
 
+The runtime exposes this through `ClaimsRuntime.finalize(at, excludedPages)`,
+which builds the OpenWiki producer verification event and forwards the skipped
+set.
+
+### Per-page proof at `submit_page`
+
+Each page job is grounded individually before its job is marked complete.
+`submitRepositoryPage` first runs page-local validation and front-matter
+repair without the run mutation lock (they touch only the submitted page),
+then takes the lock so concurrent workers never lose each other's
+completions: `reconcilePageClaims` translates the model's sparse Claim
+decisions into the complete `confirm` / `update` / `add` / `retract`
+operation batch the session expects, then `claimsRuntime.finalize` persists
+the dirty page — excluding every other still-pending page, which a concurrent
+worker may be mid-edit on, so projecting a stamp or rehashing their sidecar
+here would record transient bytes — and finally `assertPageClaimsDurable`
+re-opens the freshly written sidecar and proves the page is durable before
+the job is marked complete and the queue advances.
+
+`assertPageClaimsDurable` is the strict per-page proof. It re-reads the sidecar
+from disk and refuses the page when any of the following fail, so a partially or
+incorrectly persisted page cannot silently advance:
+
+- the sidecar was actually persisted and reloads;
+- its persisted `pageVersion` hash equals the current Markdown bytes
+  (`store.hashPage`);
+- it carries a durable `verification` event;
+- that verification event is durably projected into the page's front-matter
+  `verified` field (matching `by` and `at`);
+- the persisted Claim set has the same count as the session's expected set, and
+  every expected Claim is present with a matching `statement` and an equal
+  evidence resource set.
+
+The whole-run proof waits until every page job is complete (see below); the
+per-page proof lets `submit_page` fail fast and request a retry before the queue
+moves on.
+
+### Finishing a run: skipped pages and the whole-run proof
+
+When a repository run finishes, `finishRepositoryRun` first validates that every
+skipped page job carries its original `captureRepositoryPageSnapshot` capture,
+refusing to finish if any skipped job is missing its snapshot or its path no
+longer matches the job. It then derives `skippedPages` from the skipped jobs and
+passes the set both to `finalize` and to the post-run durability assertion
+(`assertRepositoryClaimsDurable`), so skipped pages are exempt from Claims
+persistence and from the "no orphan sidecar" / "every claimed page is durable"
+checks that gate the run.
+
 Finalization also removes orphaned sidecars (whose pages no longer exist),
-deletes sidecars for pages whose Markdown vanished, and removes sidecars for
-pages recorded as deleted. Each page's Markdown is hashed before its sidecar is
-written so the persisted `pageVersion` describes the exact bytes on disk. A page
-finalized with a non-empty Claim set receives a durable `verification` event; a
-page whose Claims were fully retracted is persisted without one.
+deletes sidecars for pages whose Markdown vanished during the run, and removes
+sidecars for pages recorded as deleted. Each page's Markdown is hashed before
+its sidecar is written so the persisted `pageVersion` describes the exact bytes on
+disk. A page finalized with a non-empty Claim set receives a durable
+`verification` event; a page whose Claims were fully retracted is persisted
+without one.
 
 Finalization is best-effort per page: recoverable per-page failures are isolated
 as warnings rather than aborting the run, but the runtime treats any warning as a
@@ -204,10 +334,15 @@ derived from the resource, and independently authored producer `sources` are
 retained.
 
 Durable verification is projected into the OKF `verified` field
-(`synchronizeClaimsVerification`): only events in the `openwiki/<version>` actor
-family are OpenWiki-owned, so human and other producer events survive. Only a
-page that is persisted, clean, non-empty, free of evidence debt, and carrying a
-verification event is eligible for a machine stamp.
+(`synchronizeClaimsVerification`). For every grounded page it keeps all
+producer-authored events whose `by` actor is not in the `openwiki/<version>`
+family, then appends at most one active durable verification event from Claims
+state (or none, when the page is ineligible). Bare verifier mappings are
+normalized to the canonical list form when the field is touched, and the
+projector records the pre-projection Markdown for each changed page so a failed
+hash refresh can roll the field back. Only a page that is persisted, clean,
+non-empty, free of evidence debt, and carrying a verification event is eligible
+for a machine stamp.
 
 The projection can rewrite code-owned front matter, which changes the Markdown
 bytes and therefore the page hash. To keep sidecars consistent with the final
@@ -228,6 +363,40 @@ Every processing phase — preflight, one mutation batch, and one finalization
 pass — wraps the resolver with a fresh `cacheEvidenceResolver` so each
 `(resource, previousVersion)` pair resolves at most once within that phase while
 never caching across a freshness boundary.
+
+## Shared model-facing guidance
+
+The substance and reconciliation standards the worker sees are not ad hoc: they
+live in `src/claims/guidance.ts` as two shared constants.
+
+`CLAIMS_SUBSTANCE_GUIDANCE` defines what counts as a material, atomic,
+evidence-backed proposition: one coherent, independently falsifiable idea rather
+than one file, symbol, or source line; one function or component may support
+several Claims when each records a different substantive truth; every evidence
+resource must use the canonical `repo://<repository-relative-path>` form
+(optionally with `#Lx-Ly`); and a materiality test — if the proposition were
+false, would it meaningfully change a reader's architectural model,
+implementation decision, operational expectation, or safe change plan? — gates
+inclusion, with completeness taking priority over minimizing Claim count.
+
+`CLAIMS_RECONCILIATION_GUIDANCE` defines the sparse-decision rules: treat a
+stale or unresolved marker as a requirement to recheck current source rather
+than retract automatically; retain issue-free Claims automatically when omitted;
+give every issue-bearing Claim one explicit `confirm` / `update` / `retract`
+decision; inspect the page's complete Claims on demand before revising
+otherwise-current content; submit every genuinely new proposition without an id
+and never resubmit an unchanged Claim; and require the final page body and
+reconciled Claim set to agree.
+
+These constants reach the model through two channels. The page-worker prompt
+(`createRepositoryPagePrompt`) inlines **both** constants into the system prompt
+for every `init` / `update` job, so a worker authoring a page sees the full
+substance and reconciliation standard. The MCP server `INSTRUCTIONS` constant
+inlines only `CLAIMS_RECONCILIATION_GUIDANCE` (the host already drives page
+authoring through `openwiki_submit_page`, whose tool description carries the
+sparse-decision rules), alongside workspace-discovery guidance and the
+deterministic page-job lifecycle, so the same reconciliation rules reach every
+MCP host integration and tool description.
 
 ## Related pages
 

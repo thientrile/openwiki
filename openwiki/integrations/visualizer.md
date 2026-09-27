@@ -4,8 +4,8 @@ title: Interactive Visualizer
 description: How the `openwiki visualize` command builds a link graph from wiki Markdown and OKF frontmatter, serves a live single-page reader over loopback HTTP, and exports a self-contained static site for hosting.
 tags: [visualizer, graph, static-export, cli, server, markdown-reader]
 verified:
-  - by: openwiki/0.3.3
-    at: 2026-08-25T02:14:25.283Z
+  - by: openwiki/0.5.2
+    at: 2026-09-23T08:09:37.122Z
 sources:
   - id: openwiki-source-5b54a58d1b51cd490b0e7162
     resource: repo://package.json
@@ -27,6 +27,10 @@ sources:
     resource: repo://src/visualize/server.ts
   - id: openwiki-source-3603986778b0b5f63cbdb37d
     resource: repo://src/visualize/static-export.ts
+  - id: openwiki-source-e3be493bc871948f42420690
+    resource: repo://test/visualize/client-interaction.test.ts
+  - id: openwiki-source-1904eaebd82125a3a3881dac
+    resource: repo://test/visualize/page.test.ts
   - id: openwiki-source-6b177c090fb1c7574a23496e
     resource: repo://test/visualize/server.test.ts
   - id: openwiki-source-2e48ab40ab957bcc05e92de0
@@ -35,7 +39,7 @@ sources:
     resource: repo://test/visualize/visualize-client-lib.test.ts
   - id: openwiki-source-42403648c3f500ce06398039
     resource: repo://tsconfig.client.json
-generated: { by: "openwiki/0.3.3", at: "2026-08-25T02:14:25.283Z" }
+generated: { by: "openwiki/0.5.2", at: "2026-09-22T08:09:45.637Z" }
 ---
 
 # Interactive Visualizer
@@ -81,12 +85,19 @@ which the client uses to scale each node's radius.
 
 Edges come from Markdown links. `linkNodes` scans each body for relative `.md`
 link targets, resolves them against the linking page's directory into node ids,
-and records a directed edge plus the reciprocal `backlinks` entry. Self-links,
-links to pages not in the graph, and duplicate edges are dropped, so the graph
-only ever contains resolvable page-to-page references. The walk stays inside the
-wiki: paths that resolve outside `wikiRoot` are skipped, symlinks (which are
-neither files nor directories to the dirent check) are never followed, and the
-scaffolding files `INSTRUCTIONS.md` and `log.md` are excluded.
+and records a directed edge plus the reciprocal `backlinks` entry. Before
+resolving a target, each link is passed through `decodeURIComponent` so that
+URL-encoded filenames — for example a link written as `Foo%20Bar.md` — decode to
+the on-disk `Foo Bar.md` and match the corresponding node id. The decode is
+wrapped in a `try`/`catch`: if a link contains a literal percent sequence that is
+not valid URL-encoding (for instance `100%.md`), the raw, undecoded link is kept
+instead of throwing, and the target must still match an existing node id or the
+link is dropped. Self-links, links to pages not in the graph, and duplicate edges
+are dropped, so the graph only ever contains resolvable page-to-page
+references. The walk stays inside the wiki: paths that resolve outside
+`wikiRoot` are skipped, symlinks (which are neither files nor directories to the
+dirent check) are never followed, and the scaffolding files `INSTRUCTIONS.md`
+and `log.md` are excluded.
 
 ```mermaid
 flowchart TD
@@ -118,6 +129,26 @@ from the request URL, which removes path-traversal as a class of bug. The handle
 receives the graph through a getter rather than a captured value, because the
 server reassigns the graph on each rebuild and every request must serve the latest
 one.
+
+The page's Content-Security-Policy is a single shared `CSP` constant in
+`src/visualize/page.ts` that both the live server (as the `content-security-policy`
+HTTP response header on `/` and `/index.html`) and a static export (as a
+`<meta http-equiv="Content-Security-Policy">` tag in the HTML) enforce, so the
+anti-XSS/supply-chain boundary cannot drift between modes. It pins scripts to
+`'self'` and the jsdelivr CDN (`script-src 'self' https://cdn.jsdelivr.net`) with
+no inline scripts — the CDN `<script>` tags carry Subresource Integrity hashes —
+while inline styles remain allowed (`style-src 'self' 'unsafe-inline'`) so the
+client can theme the graph. The page itself requests the Inter typeface from
+Google Fonts: a `<link>` to a `fonts.googleapis.com` stylesheet whose CSS in turn
+references font files on `fonts.gstatic.com`. The CSP therefore allows the
+stylesheet origin in `style-src` (`'self' 'unsafe-inline'
+https://fonts.googleapis.com`) and the font-file origin in `font-src` (`'self'
+https://fonts.gstatic.com`); before these origins were added both directives were
+`'self'` only, and every CSP-enforcing browser silently blocked the font request
+so the visualizer never actually rendered in the Inter typeface it ships. The
+remaining directives (`default-src 'none'`, `img-src 'self' data:`,
+`connect-src 'self'`, `base-uri 'none'`, `form-action 'none'`) keep the reader
+locked down while rendering arbitrary wiki Markdown.
 
 Live reload is driven by the filesystem watch. A change under the wiki triggers a
 debounced (150 ms) rebuild; on success the server broadcasts an SSE `reload` event
@@ -153,7 +184,45 @@ coordinated views: the force-directed graph canvas, a type/color legend, and a
 sidebar index of every page grouped by type. Clicking a node — on the canvas, in
 the sidebar, via a backlink chip, or through an in-page wiki link — opens that page
 in the reader without moving the camera, so reading never yanks the graph out from
-under you.
+under you. The hint and legend are not standalone panels: `renderPage` nests the
+`#graph-overlay` (the `#hint` line plus the `#legend`) directly inside the `#graph`
+div, and the stylesheet caps that overlay with `position: absolute` and a
+`max-height` against the graph panel's own box. Anchoring the overlay to `#graph`
+rather than to `.main` keeps it confined to the graph column, so a wiki with many
+page types can no longer grow the legend into a full-width bar that covers the
+sidebar, the graph, and the reader.
+
+Clicking empty graph space is deliberately a no-op. The graph instance registers
+only `onNodeClick` and `onNodeHover`; there is no `onBackgroundClick` handler, so a
+stray click on blank canvas never clears the selection or the reader. This is the
+issue #670 regression fix — the former background-click handler wiped the page the
+user was reading.
+
+Graph labels are contextual, not ambient — the "declutter visualizer graph labels"
+feature. By default no node labels are painted on the canvas: the sidebar index is
+the always-visible page list, so the graph stays readable at any size. `paintNode`
+consults the pure `shouldShowNodeLabel` helper (from `client-lib.ts`) with the
+current selection, hover, and neighbourhood state to decide, per node, whether to
+draw its title. When nothing is selected, only the hovered node's label shows;
+when a node is selected, that node plus its directly connected neighbours show
+labels; unrelated nodes never show labels. Hovering is suspended while a page is
+selected — `hoverHighlight` returns early when a selection is active, so the
+selected neighbourhood's labels hold until the selection changes.
+
+```mermaid
+flowchart TD
+  Start["paintNode considers node n"] --> Q{"is a node selected?"}
+  Q -- "yes (selectedId set)" --> Q2{"n is the selected node<br/>or in its neighbourhood?"}
+  Q2 -- "yes" --> Show["paint n's label"]
+  Q2 -- "no" --> Hide["no label for n"]
+  Q -- "no (selectedId null)" --> Q3{"n is the hovered node?"}
+  Q3 -- "yes" --> Show
+  Q3 -- "no" --> Hide
+```
+
+`shouldShowNodeLabel` decision logic: selection wins over hover, and only the
+selected node plus its immediate neighbours — or the single hovered node when
+nothing is selected — ever paint a canvas label.
 
 The reader renders the page body as Markdown. Because `marked` passes raw HTML
 through, the output is sanitized with DOMPurify before assignment to `innerHTML`,
@@ -177,8 +246,13 @@ and subscribes to `/events`.
 
 The pure, DOM-independent helpers used by the client — `escapeHtml`,
 `colorsForTypes`, `nodeRadius`, `signature`, `matchesFilter`, `normalize`,
-`stripFrontmatter`, and `hexA` — live in `src/visualize/client-lib.ts` so they can
-be unit-tested directly without a browser.
+`stripFrontmatter`, `hexA`, and `shouldShowNodeLabel` (with its
+`NodeLabelContext` interface) — live in `src/visualize/client-lib.ts` so they can
+be unit-tested directly without a browser. `shouldShowNodeLabel` decides whether
+a node label should be painted on the canvas based on interaction context: when
+nothing is selected, only the hovered node's label shows; when a node is
+selected, the selected node plus its immediate neighbours show labels; unrelated
+nodes never show labels.
 
 ## Static export
 
@@ -193,10 +267,14 @@ no live server and no SSE — the live/stale pill simply reads "Static".
 The HTML for both modes is produced by a single `renderPage` function in
 `src/visualize/page.ts`, parameterized by whether it is a static export; this keeps
 the live and exported apps identical apart from asset URLs, the CSP delivery
-mechanism, and the live indicator. The three browser libraries (force-graph,
-marked, DOMPurify) plus mermaid load from `cdn.jsdelivr.net` at pinned exact
-versions with Subresource Integrity hashes, and the CSP forbids inline scripts, so
-the reader stays locked down even while rendering arbitrary wiki Markdown.
+mechanism, and the live indicator — including the shared DOM layout, where the
+hint-plus-legend overlay lives inside the `#graph` panel rather than as a sibling of
+it. The three browser libraries (force-graph, marked, DOMPurify) plus mermaid load
+from `cdn.jsdelivr.net` at pinned exact versions with Subresource Integrity hashes,
+the page also `<link>`s the Inter typeface from Google Fonts, and the shared CSP
+forbids inline scripts while allowing the Google Fonts stylesheet and font-file
+origins, so the reader stays locked down even while rendering arbitrary wiki
+Markdown and rendering in its shipped typeface.
 
 ## Build pipeline and assets
 

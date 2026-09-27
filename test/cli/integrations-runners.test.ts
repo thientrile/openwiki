@@ -65,6 +65,11 @@ describe("runIntegrationsCommand", () => {
     vi.mocked(getHostIntegrationStatus)
       .mockResolvedValueOnce("installed")
       .mockResolvedValueOnce("modified")
+      .mockResolvedValueOnce("not-installed")
+      .mockResolvedValueOnce("not-installed")
+      .mockResolvedValueOnce("not-installed")
+      .mockResolvedValueOnce("not-installed")
+      .mockResolvedValueOnce("not-installed")
       .mockResolvedValueOnce("not-installed");
 
     await runIntegrationsCommand({
@@ -78,11 +83,16 @@ describe("runIntegrationsCommand", () => {
     });
 
     expect(stdout.join("")).toBe(
-      "codex\tinstalled\tCodex\n" +
-        "claude\tmodified\tClaude Code\n" +
-        "opencode\tnot-installed\tOpenCode\n",
+      "bob\tinstalled\tIBM Bob\n" +
+        "codex\tmodified\tCodex\n" +
+        "claude\tnot-installed\tClaude Code\n" +
+        "opencode\tnot-installed\tOpenCode\n" +
+        "cursor\tnot-installed\tCursor\n" +
+        "kiro\tnot-installed\tKiro\n" +
+        "omp\tnot-installed\tOh My Pi\n" +
+        "antigravity\tnot-installed\tAntigravity CLI\n",
     );
-    expect(getHostIntegrationStatus).toHaveBeenCalledTimes(3);
+    expect(getHostIntegrationStatus).toHaveBeenCalledTimes(8);
     expect(getHostIntegrationStatus).toHaveBeenCalledWith(
       expect.objectContaining({ id: "codex" }),
       { scope: "user", root: os.homedir() },
@@ -213,6 +223,7 @@ describe("runMcpCommand", () => {
   test.each([
     ["claude", "claude-code"],
     ["opencode", "opencode"],
+    ["antigravity", "antigravity"],
     ["custom-host", "custom-host"],
   ])(
     "starts a rootless %s MCP server with producer %s",
